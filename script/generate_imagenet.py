@@ -22,6 +22,11 @@ the weights has rows (4 for the released weights).
 
 `--group_attention 0` makes the unconditional prediction for each image alone as well. The noise of an image is
 drawn from --seed + sample index, so an image starts from the same noise in both settings.
+
+The released code draws the ids of the sample embedding at random in every call of the denoiser, so the ids of an
+image change from step to step and depend on the other images of the batch (`--sample_ids random`, the default).
+`--sample_ids position` gives an image the id of its position in its group in every call instead; an image then
+depends only on its group, and the two settings of --group_attention differ in the attention alone.
 """
 
 import argparse
@@ -115,6 +120,11 @@ class GuidedPrediction:
         return out[: x.shape[0]]
 
 
+def use_position_ids(model, positions: torch.Tensor):
+    """Give every image the id of its position in its group, alone or in the group, in place of the random ids."""
+    model.denoiser._generate_random_sample_ids = lambda groups, size, device: positions.view(groups, size)
+
+
 @torch.no_grad()
 def sample(model, diffusion, groups: list[Group], args, device) -> torch.Tensor:
     """Sample groups of one size. The images of a group are consecutive, as the group attention expects."""
@@ -123,9 +133,11 @@ def sample(model, diffusion, groups: list[Group], args, device) -> torch.Tensor:
     labels = torch.tensor([label for g in groups for label in g.labels], device=device)
     indices = [i for g in groups for i in g.sample_indices]
     predict = GuidedPrediction(model, labels, size, args)
+    if args.sample_ids == "position":
+        use_position_ids(model, torch.arange(size, device=device).repeat(len(groups)))
     shape = (model.token_channels, model.input_size, model.input_size)
     generators = [torch.Generator().manual_seed(args.seed + i) for i in indices]
-    # the ids of the sample embedding are drawn from the global generator; pin it so that a rerun gives the same images
+    # random ids of the sample embedding come from the global generator; pin it so that a rerun gives the same images
     torch.manual_seed(args.seed + min(indices))
 
     def noise():
@@ -155,7 +167,7 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     groups = load_groups(args.groups, args.limit_groups)
     too_large = [g.name for g in groups if len(g.labels) > args.num_max_sample]
-    if too_large and args.group_attention:
+    if too_large and (args.group_attention or args.sample_ids == "position"):
         raise ValueError(
             f"{len(too_large)} groups hold more than {args.num_max_sample} images, the rows of the sample embedding "
             f"(first: {too_large[0]})"
@@ -228,6 +240,8 @@ def get_args_parser():
     parser.add_argument("--cfg", required=True, type=float, help="guidance weight w of eps_u + w (eps_c - eps_u)")
     parser.add_argument("--group_attention", default=1, type=int, choices=[0, 1],
                         help="1: unconditional prediction of the images of a group together; 0: each image alone")
+    parser.add_argument("--sample_ids", default="random", type=str, choices=["random", "position"],
+                        help="ids of the sample embedding: drawn in every call as released, or the position in the group")
     parser.add_argument("--guidance_low", default=0.0, type=float, help="guidance is applied for t / 1000 in [low, high]")
     parser.add_argument("--guidance_high", default=1.0, type=float)
     parser.add_argument("--steps", default=250, type=int, help="sampling steps of the DDPM sampler")

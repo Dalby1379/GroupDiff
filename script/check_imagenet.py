@@ -30,7 +30,7 @@ def make_args(root: str, groups: list[dict], **overrides):
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"groups": groups}, f)
     argv = ["--ckpt", os.path.join(root, "weights.pth"), "--groups", path, "--out", os.path.join(root, "out"),
-            "--cfg", "2.0", "--steps", "3", "--precision", "fp32", "--model", "DiT_check",
+            "--cfg", "2.0", "--steps", "3", "--precision", "fp32", "--model", "DiT_check", "--sample_ids", "position",
             "--img_size", str(IMAGE_SIZE), "--skip_decode"]
     args = generate.get_args_parser().parse_args(argv)
     for key, value in overrides.items():
@@ -53,13 +53,6 @@ def make_weights(root: str):
 def close(a: torch.Tensor, b: torch.Tensor) -> bool:
     """Equal up to the rounding that the size of a batch changes, relative to the scale of the latents."""
     return float((a - b).abs().max()) <= 1e-5 * float(b.abs().max())
-
-
-def fix_sample_ids(model):
-    """The released code draws the ids of the sample embedding anew in every call. Fix them to compare runs."""
-    model.denoiser._generate_random_sample_ids = lambda groups, size, device: (
-        torch.arange(size, device=device).unsqueeze(0).repeat(groups, 1)
-    )
 
 
 def run(model, args, groups: list[dict]) -> dict[tuple[str, str], torch.Tensor]:
@@ -112,7 +105,17 @@ def check_images_are_independent_of_batching(model, args):
             assert close(x[k], together[(g.name, member)]), "an image must not depend on the batch"
     torch.manual_seed(123)  # whatever the state of the global generator before the call
     assert all(torch.equal(v, together[k]) for k, v in run(model, args, groups).items()), "reruns must be identical"
-    print("ok  batching: 9 images in groups of 1, 2 and 4 are the same sampled together or group by group; reruns are identical")
+
+    # the random ids of the released code: a rerun is still identical, but an image depends on its batch
+    args.sample_ids = "random"
+    released = generate.load_model(args, torch.device("cpu"))
+    first = run(released, args, groups)
+    torch.manual_seed(123)
+    assert all(torch.equal(v, first[k]) for k, v in run(released, args, groups).items()), "reruns must be identical"
+    assert not close(first[("b", "1")], together[("b", "1")]), "random ids must differ from the ids of the positions"
+    args.sample_ids = "position"
+    print("ok  batching: with the ids of the positions, 9 images in groups of 1, 2 and 4 are the same sampled together "
+          "or group by group; reruns are identical, also with random ids")
 
 
 def check_group_interaction(model, args):
@@ -135,6 +138,7 @@ def check_group_interaction(model, args):
     # in a group the class of another image changes this image, through that image's latent, so not within one step
     assert not torch.equal(grouped[first], run(model, args, other_label)[first]), "the images of a group must interact"
     diffusion = model.gen_diffusion
+    generate.use_position_ids(model, torch.arange(3).repeat(2))
     x = torch.randn(6, model.token_channels, model.input_size, model.input_size)
     t = torch.full((6,), diffusion.num_timesteps - 1)
     means = [
@@ -218,7 +222,6 @@ def main():
         check_weights(root)
         args = make_args(root, [])
         model = generate.load_model(args, torch.device("cpu"))
-        fix_sample_ids(model)
         check_images_are_independent_of_batching(model, args)
         check_group_interaction(model, args)
         check_main(root)

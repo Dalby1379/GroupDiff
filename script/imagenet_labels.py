@@ -129,9 +129,11 @@ def category_table(data, keep: np.ndarray) -> dict:
     """Per furniture category: how its items are spread over the classes.
 
     top1 and top5 count the items whose first, or first five, classes contain the class; prob is the mean
-    probability of the class (classes below the stored first ten count as zero).
+    probability of the class (classes below the stored first ten count as zero). purity is, of the items of all
+    categories whose first class is the class, the share that belongs to this category.
     """
     table = {}
+    first_class_items = np.bincount(data["top_index"][keep, 0].astype(np.int64), minlength=1000)
     for c, name in enumerate(data["category_names"]):
         rows = keep & (data["category"] == c)
         index, prob = data["top_index"][rows].astype(np.int64), data["top_prob"][rows].astype(np.float64)
@@ -144,6 +146,7 @@ def category_table(data, keep: np.ndarray) -> dict:
             "top1": top1,
             "top5": top5,
             "prob": mean_prob,
+            "purity": np.bincount(index[:, 0], minlength=1000) / np.maximum(first_class_items, 1),
             "confidence": float(prob[:, 0].mean()) if n else 0.0,
         }
     return table
@@ -168,8 +171,9 @@ def report(args):
         f"Items: {int(keep.sum())} of {len(ids)}"
         + (f" (those of {', '.join(os.path.basename(p) for p in args.rooms)})" if args.rooms else ""),
         "",
-        "share = items whose first class is the class; in top 5 = items with the class among their first five;",
-        "prob = mean probability of the class. Classes are listed by share, the first "
+        "share = items of the category whose first class is the class; in top 5 = items with the class among their",
+        "first five; prob = mean probability of the class; purity = of the items of all categories whose first class",
+        f"is the class, the share that belongs to this category. Classes are listed by share, the first "
         f"{args.classes_per_category} of every category.",
     ]
     summary = {"tag": args.tag, "items": int(keep.sum()), "models": models, "categories": {}}
@@ -182,13 +186,13 @@ def report(args):
             lines += [
                 f"{model}: mean probability of the first class {entry['confidence']:.2f}",
                 "",
-                "| class | name | share | in top 5 | prob |",
-                "|---|---|---|---|---|",
+                "| class | name | share | in top 5 | prob | purity |",
+                "|---|---|---|---|---|---|",
             ]
             for k in order:
                 lines.append(
                     f"| {k} | {names[k]} | {100 * entry['top1'][k]:.1f}% | {100 * entry['top5'][k]:.1f}% "
-                    f"| {entry['prob'][k]:.3f} |"
+                    f"| {entry['prob'][k]:.3f} | {100 * entry['purity'][k]:.0f}% |"
                 )
             lines.append("")
             summary["categories"][category][model] = {
@@ -200,6 +204,7 @@ def report(args):
                         "top1": float(entry["top1"][k]),
                         "top5": float(entry["top5"][k]),
                         "prob": float(entry["prob"][k]),
+                        "purity": float(entry["purity"][k]),
                     }
                     for k in order
                 ],

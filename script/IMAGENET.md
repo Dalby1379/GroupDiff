@@ -46,6 +46,10 @@ It is a plain `{category: class}` file; edit it to use other classes.
 - A group holds at most 4 images, the rows of the sample embedding of the released weights. The `groups` step
   leaves out rooms with more targets and logs how many; `generate_imagenet.py` refuses larger groups.
 - The noise of an image is drawn from `--seed` + its position in the group file, so an image starts from the same
-  noise with and without group attention. The ids of the sample embedding are drawn anew in every call, as in
-  the released code; they come from the global generator, which is pinned per batch.
+  noise with and without group attention.
+- The released code draws the ids of the sample embedding at random in every call of the denoiser. With
+  `--sample_ids random` (the default) an image therefore also depends on the other images of its batch, and
+  `--group_attention 1` and `0` differ in these ids as well as in the attention. A rerun still gives the same
+  images, because the global generator is pinned per batch. `--sample_ids position` gives an image the id of its
+  position in its group in every call; an image then depends only on its group.
 - Only the DiT weights are supported. The SiT weights use a different sampler (`models/sit.py`).
