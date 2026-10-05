@@ -228,11 +228,21 @@ def check_generation(rooms_path, cache_dir, root):
     expected = sorted(i for room in rooms for i in room.sample_indices)
     assert all(v == expected for v in finals.values()), "every target of every room must be generated once"
 
-    # the first noise of a target depends on its seed only
-    a = torch.randn(4, 8, 8, generator=torch.Generator().manual_seed(42 + expected[0]))
-    b = torch.randn(4, 8, 8, generator=torch.Generator().manual_seed(42 + expected[0]))
-    assert torch.equal(a, b)
-    print(f"ok  generation: forms none, l, f produce all {len(expected)} targets, with and without query members")
+    # running the same command twice gives the same latents
+    model, saved_args = generate.load_model(os.path.join(root, "gen_train_f", "final_ema.pt"), "ema", "cpu")
+    gen_args = generate.get_args_parser().parse_args(
+        ["--ckpt", "x", "--rooms", rooms_path, "--cache_dir", cache_dir, "--out", "x", "--query_members", "1"]
+    )
+    diffusion = create_diffusion("3", noise_schedule="linear")
+    cache = FeatureCache(cache_dir)
+    autocast = train.make_autocast(saved_args)
+    shape = (rooms[0].num_targets, rooms[0].num_queries)
+    indices = [r for r, room in enumerate(rooms) if (room.num_targets, room.num_queries) == shape]
+    first, _ = generate.sample(model, diffusion, cache, rooms, indices, gen_args, saved_args, autocast)
+    torch.manual_seed(123)  # whatever the state of the global generator before the call
+    second, _ = generate.sample(model, diffusion, cache, rooms, indices, gen_args, saved_args, autocast)
+    assert torch.equal(first, second), "generation must not depend on the state of the global generator"
+    print(f"ok  generation: forms none, l, f produce all {len(expected)} targets, with and without query members; reruns are identical")
 
 
 def main():

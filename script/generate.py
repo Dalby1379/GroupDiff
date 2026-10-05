@@ -94,6 +94,8 @@ def sample(model, diffusion, cache, rooms, indices, args, train_args, autocast) 
     )
     shape = cond_group.target_latents.shape[1:]
     generators = [torch.Generator().manual_seed(args.seed + i) for i in cond_group.sample_indices]
+    # the ids of the sample embedding are drawn from the global generator; pin it so that a rerun gives the same images
+    torch.manual_seed(args.seed + min(cond_group.sample_indices))
 
     def noise():
         return torch.stack([torch.randn(shape, generator=g) for g in generators]).to(cache.device)
