@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from timm.models.vision_transformer import Attention, Mlp, PatchEmbed
 
@@ -122,26 +123,58 @@ class LabelEmbedder(nn.Module):
 #################################################################################
 
 
+class CrossAttention(nn.Module):
+    """
+    Multi-head cross-attention from the patches of one image to its own context tokens (text and image tokens).
+    """
+
+    def __init__(self, hidden_size, num_heads):
+        super().__init__()
+        assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.q = nn.Linear(hidden_size, hidden_size, bias=True)
+        self.kv = nn.Linear(hidden_size, hidden_size * 2, bias=True)
+        self.proj = nn.Linear(hidden_size, hidden_size, bias=True)
+
+    def forward(self, x, context):
+        """
+        x: (N, T, D) tensor of patch tokens.
+        context: (N, L, D) tensor of context tokens.
+        """
+        n, t, d = x.shape
+        head_dim = d // self.num_heads
+        q = self.q(x).reshape(n, t, self.num_heads, head_dim).transpose(1, 2)
+        k, v = self.kv(context).reshape(n, context.shape[1], 2, self.num_heads, head_dim).permute(2, 0, 3, 1, 4)
+        x = F.scaled_dot_product_attention(q, k, v)
+        return self.proj(x.transpose(1, 2).reshape(n, t, d))
+
+
 class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
 
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, cross_attention=False, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        if cross_attention:
+            self.norm_cross = nn.LayerNorm(hidden_size, eps=1e-6)
+            self.cross_attn = CrossAttention(hidden_size, num_heads)
+        else:
+            self.cross_attn = None
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
-    def forward(self, x, c):
+    def forward(self, x, c, context=None):
         """
         Forward pass of DiTBlock.
         x: (N, M, T, D) tensor of inputs, where N is batch size, M is number of samples, T is number of patches, and D is hidden size.
         c: (N, M, D) tensor of conditioning inputs, where N is batch size, M is number of samples, and D is hidden size.
+        context: optional (N * M, L, D) tensor of context tokens. Each image attends to its own context only.
         """
         n, m, t = x.shape[:3]
         x = reshape_group_to_batch(x)  # (N * M, T, D) # Flatten batch and sample dimensions
@@ -153,6 +186,8 @@ class DiTBlock(nn.Module):
         x = x + gate_msa.unsqueeze(1) * rearrange(
             self.attn(rearrange(x_shift, "(b m) t d -> b (m t) d", b=n, m=m)), "b (m t) d-> (b m) t d", b=n, m=m, t=t
         )
+        if self.cross_attn is not None and context is not None:
+            x = x + self.cross_attn(self.norm_cross(x), context)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
 
         x = reshape_batch_to_group(x, m)  # before returning, we need to reshape x back to (N, M, T, D)
@@ -203,6 +238,11 @@ class Denoiser(nn.Module):
 
         use_grad_checkpoint: bool = True
 
+        # cross-attention conditioning. context_dim == 0 disables it and keeps the class-conditional model unchanged.
+        context_dim: int = 0  # feature size of the text tokens, e.g. 768 for CLIP ViT-L/14
+        image_embed_dim: int = 0  # size of a pooled image embedding appended as image tokens; 0 disables it
+        num_image_tokens: int = 4
+
     """
     Diffusion model with a Transformer backbone.
     """
@@ -245,7 +285,24 @@ class Denoiser(nn.Module):
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
-        self.blocks = nn.ModuleList([DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)])
+        self.use_context = config.context_dim > 0
+        self.num_image_tokens = config.num_image_tokens
+        if self.use_context:
+            self.context_proj = nn.Linear(config.context_dim, hidden_size, bias=True)
+        if config.image_embed_dim > 0:
+            assert self.use_context, "image tokens are appended to the text tokens, so context_dim must be set"
+            # same form as the image projection of IP-Adapter: a linear layer to a few tokens, then LayerNorm
+            self.image_proj = nn.Linear(config.image_embed_dim, config.num_image_tokens * hidden_size, bias=True)
+            self.image_norm = nn.LayerNorm(hidden_size)
+        else:
+            self.image_proj = None
+
+        self.blocks = nn.ModuleList(
+            [
+                DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, cross_attention=self.use_context)
+                for _ in range(depth)
+            ]
+        )
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
 
@@ -281,6 +338,12 @@ class Denoiser(nn.Module):
         for block in self.blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+        # Zero-out the output projection of cross-attention, so that the block starts as the block without it:
+        for block in self.blocks:
+            if block.cross_attn is not None:
+                nn.init.constant_(block.cross_attn.proj.weight, 0)
+                nn.init.constant_(block.cross_attn.proj.bias, 0)
 
         # Zero-out output layers:
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
@@ -359,12 +422,16 @@ class Denoiser(nn.Module):
         use_fix_sample_ids: bool = False,
         group_size: int = 1,
         keep_group_shape: bool = True,
+        context=None,
+        image_embeds=None,
     ):
         """
         Forward pass of DiT.
         x: (N, M, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N, M,) tensor of diffusion timesteps
         y: (N, M,) tensor of class labels
+        context: optional (N * M, L, context_dim) tensor of text token features, one sequence per image
+        image_embeds: optional (N * M, image_embed_dim) tensor of pooled image embeddings, one per image
         """
         if x.ndim == 5:
             bs, group_size, *rest = x.shape
@@ -399,13 +466,22 @@ class Denoiser(nn.Module):
         c = reshape_batch_to_group(c, group_size)
         x = reshape_batch_to_group(x, group_size)
 
+        if self.use_context and context is not None:
+            context = self.context_proj(context)  # (N * M, L, D)
+            if self.image_proj is not None:
+                image_tokens = self.image_proj(image_embeds).reshape(context.shape[0], self.num_image_tokens, -1)
+                context = torch.cat([context, self.image_norm(image_tokens)], dim=1)  # (N * M, L + K, D)
+        else:
+            context = None
+
         hidden_states = []
 
         for block in self.blocks:
             if self.use_grad_checkpoint:
-                x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, use_reentrant=True)  # (N, T, D)
+                block_inputs = (x, c) if context is None else (x, c, context)
+                x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), *block_inputs, use_reentrant=True)  # (N, T, D)
             else:
-                x = block(x, c)  # (N, T, D)
+                x = block(x, c, context)  # (N, T, D)
             if return_hidden_states:
                 hidden_states.append(x)
         x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
