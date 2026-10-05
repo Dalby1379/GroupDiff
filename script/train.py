@@ -174,18 +174,30 @@ class HubSync:
 
         self.api = HfApi()
         self.repo, self.branch = repo, branch
-        self.api.create_repo(repo, private=True, exist_ok=True)
-        self.api.create_branch(repo, branch=branch, exist_ok=True)
         self.thread = None
+        self.ready = False
+        self._prepare()
+
+    def _prepare(self):
+        """Create the repository and the branch. A failure, such as the hourly commit limit, is retried at the next upload."""
+        try:
+            self.api.create_repo(self.repo, private=True, exist_ok=True)
+            self.api.create_branch(self.repo, branch=self.branch, exist_ok=True)
+            self.ready = True
+        except Exception as e:  # training goes on without the hub copy until it is reachable
+            logger.warning("hub branch %s@%s is not ready: %s", self.repo, self.branch, str(e)[:300])
 
     def _upload(self, path: str, name: str):
         try:
-            self.api.upload_file(path_or_fileobj=path, path_in_repo=name, repo_id=self.repo, revision=self.branch)
-            # keep a single commit on the branch, so that replaced checkpoints do not stay in the history
-            self.api.super_squash_history(self.repo, branch=self.branch)
-            logger.info("uploaded %s to %s@%s", name, self.repo, self.branch)
+            if not self.ready:
+                self._prepare()
+            if self.ready:
+                self.api.upload_file(path_or_fileobj=path, path_in_repo=name, repo_id=self.repo, revision=self.branch)
+                # keep a single commit on the branch, so that replaced checkpoints do not stay in the history
+                self.api.super_squash_history(self.repo, branch=self.branch)
+                logger.info("uploaded %s to %s@%s", name, self.repo, self.branch)
         except Exception as e:  # an upload that fails must not stop training
-            logger.warning("upload of %s failed: %s", name, e)
+            logger.warning("upload of %s failed: %s", name, str(e)[:300])
         finally:
             if path.endswith(".uploading"):
                 os.remove(path)
@@ -204,6 +216,25 @@ class HubSync:
         self.thread.start()
         if wait:
             self.thread.join()
+
+    def upload_final(self, folder: str, names: list, attempts: int = 30) -> bool:
+        """Upload the files that stay after training in one commit. Retried for a while, since nothing follows it."""
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join()
+        names = [n for n in names if os.path.isfile(os.path.join(folder, n))]
+        for attempt in range(attempts):
+            try:
+                if not self.ready:
+                    self._prepare()
+                if self.ready:
+                    self.api.upload_folder(folder_path=folder, repo_id=self.repo, revision=self.branch, allow_patterns=names)
+                    self.api.super_squash_history(self.repo, branch=self.branch)
+                    logger.info("uploaded %s to %s@%s", names, self.repo, self.branch)
+                    return True
+            except Exception as e:
+                logger.warning("final upload failed (attempt %d): %s", attempt + 1, str(e)[:300])
+            time.sleep(300)
+        return False
 
     def download(self, name: str, path: str) -> bool:
         from huggingface_hub import hf_hub_download
@@ -384,11 +415,7 @@ def main(args):
         # what stays after training: the EMA weights and the arguments needed to rebuild the model
         torch.save({"ema": ema.state_dict(), "args": vars(args), "global_step": global_step}, final)
     if hub is not None:
-        hub.upload(latest, "latest.pt", wait=True)
-        for name in ["final_ema.pt", "log.jsonl", "val_loss.jsonl", "args.json", "train.log"]:
-            path = os.path.join(args.out, name)
-            if os.path.isfile(path):
-                hub.upload(path, name, wait=True)
+        hub.upload_final(args.out, ["latest.pt", "final_ema.pt", "log.jsonl", "val_loss.jsonl", "args.json", "train.log"])
     logger.info("finished at epoch %d, step %d", epoch, global_step)
 
 
