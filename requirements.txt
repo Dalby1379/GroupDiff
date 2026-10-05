@@ -6,6 +6,7 @@ einops
 wandb
 matplotlib
 diffusers
+transformers
 torchtnt
 rich
 huggingface_hub
