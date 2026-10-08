@@ -1,0 +1,19 @@
+# sha256 of the files the notebook downloads: <sha256>  <revision>:<path> (Hugging Face, private repository) or url:<url>.
+# data-deepfurniture: room files and image list as used by the recorded runs, and the clip test gallery (from the retrieval code base).
+0905210ccd7f719993f5a17b1abc3f67051e44345a08734dc61f27054dca5dc3  data-deepfurniture:rooms_train.json
+e1262a4df5f1df823ffe28e7dc99f3143d836b10438c3d94d889c182b0c16735  data-deepfurniture:rooms_val.json
+d05029b2f70c893fd1336ffadf48aed9fab4c06be1d37b83f2e508156f9d3060  data-deepfurniture:rooms_test0.json
+16cc846f0711effab4af6c0b8245a07f434bf5ac1d8d9e5190cb04b96c8c3a51  data-deepfurniture:furnitures_sha256.txt.gz
+3c4aab717873d1c5b6205711e3dc7eb0aad9d7a83efd839bd28f0ccd9d002f12  data-deepfurniture:rooms_val100.json
+22b8fc544601325ee749d8a796bc4ed790048543b1820511f22a35cce74ef510  data-deepfurniture:clip_vectors/Bed.pkl
+b04547a7a87e3d623c44582372dc692294083e692b04faba182c9181d5c8558e  data-deepfurniture:clip_vectors/Cabinet#Shelf.pkl
+0d22c75a4bee5563d293a78e6dce193e140eca3c46552fdef7dd338a36266b65  data-deepfurniture:clip_vectors/Chair#Stool.pkl
+4dd2a0e7380c8b0dd0a0c8216d3c5b0c66e8536338b9c10a980fb1c8d0892242  data-deepfurniture:clip_vectors/Curtain.pkl
+30fd1ff2e6813c11968f05dcea062991c3ca37483d3f276eba7872e6b8eb9280  data-deepfurniture:clip_vectors/Decoration.pkl
+dfaa5ff08c4e4607a8e6b673e22cf037c3387d9e4a09100211a4a18680d723c9  data-deepfurniture:clip_vectors/Door.pkl
+5dcc1e25ea5eea2596e165f34aa3433067adccfa685cd8721691f01f18f40a3b  data-deepfurniture:clip_vectors/Home-appliance.pkl
+f4012ef086fceb9798f02d0fd2835d1a0abd44d07d14945fc7460e6e584897d2  data-deepfurniture:clip_vectors/Lamp.pkl
+a941ba6503c33a62251ccaf0d853d67896baf305d7c43e2696f3bd1fb206ae31  data-deepfurniture:clip_vectors/Plant.pkl
+fbb0892321553383984444463932e80e40d7d3ad64884b8bcea288b603ef0c32  data-deepfurniture:clip_vectors/Sofa.pkl
+8558bb4b1daa55699958e8e6363ec1b245162f028046dbffe8c8e4862ad30892  data-deepfurniture:clip_vectors/Table.pkl
+9ec1876e4c03471bca126663a30e2d1b20610b6d2f87850a39a36f25cc685521  url:https://dl.fbaipublicfiles.com/DiT/models/DiT-XL-2-256x256.pt
